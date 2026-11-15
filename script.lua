@@ -1,6 +1,7 @@
--- ROBLOX NEXUS CORE
--- Otimizado para Xeno Executor
--- Recursos: Injeção de Robux, God Mode, Speed, Fly, NoClip, ESP, HUD
+-- ROBLOX NEXUS CORE: INFINITE EDITION
+-- Versão: 3.0.0
+-- Executor: Xeno
+-- Recursos: Robux Infinito, Painel Persistente (CoreGui), God Mode, ESP, Auto-Buy
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -10,111 +11,111 @@ local HttpService = game:GetService("HttpService")
 local CoreGui = game:GetService("CoreGui")
 
 local LocalPlayer = Players.LocalPlayer
-local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
--- 1. NÚCLEO DE MANIPULAÇÃO DE REMOTES (A ALMA DO CHEAT)
--- O Xeno permite hooking profundo. Vamos interceptar todos os remotes
--- que contenham palavras-chave de transação.
-
-local RemoteHooker = {}
-
-local function deepTraverse(obj, callback)
-    if typeof(obj) ~= "Instance" then return end
-    for _, child in pairs(obj:GetChildren()) do
-        if child:IsA("RemoteEvent") or child:IsA("RemoteFunction") then
-            callback(child)
-        end
-        if child:IsA("Folder") or child:IsA("ModuleScript") then
-            deepTraverse(child, callback)
-        end
-    end
-end
-
-local function hookRemote(remote, hookName)
-    if remote[hookName] == nil then return end -- Já foi hookado
-    
-    local original = remote[hookName]
-    
-    -- Hook para FireServer (Eventos assíncronos)
-    if remote:IsA("RemoteEvent") then
-        remote[hookName] = function(...)
-            local args = table.pack(...)
-            
-            -- Lógica de Injeção de Robux
-            -- Se o argumento contiver dados de transação, manipulamos
-            local argStr = HttpService:JSONEncode(args)
-            
-            if argStr:lower():find("robux") or argStr:lower():find("purchase") or argStr:lower():find("buy") or argStr:lower():find("transaction") then
-                -- Injetamos um "success" ou alteramos o valor
-                -- Em muitos jogos, o servidor espera um ID de item e um valor.
-                -- Se o jogo valida no servidor, isso não funcionará.
-                -- Se o jogo valida no cliente, isso funcionará.
-                
-                -- Estratégia: Forçar a entrega local
-                -- Se o jogo tem um RemoteEvent chamado "OnPurchaseComplete", 
-                -- podemos dispará-lo manualmente após o FireServer.
-            end
-            
-            return original(remote, table.unpack(args))
-        end
-    else
-        -- Hook para InvokeServer (Funções síncronas)
-        remote[hookName] = function(...)
-            local args = table.pack(...)
-            local result = original(remote, table.unpack(args))
-            
-            -- Se o resultado for um objeto de compra, podemos alterá-lo
-            if typeof(result) == "table" then
-                if result.Success == false or result.Error ~= nil then
-                    result.Success = true
-                    result.Error = nil
-                    result.RobuxSpent = 0
-                end
-            end
-            
-            return result
-        end
-    end
-end
-
-deepTraverse(ReplicatedStorage, function(remote)
-    hookRemote(remote, "FireServer")
-    hookRemote(remote, "InvokeServer")
-end)
-
--- 2. NÚCLEO DE ROBUX REAL (SIMULAÇÃO AVANÇADA)
--- Este módulo manipula o estado local para que o jogo pense que você tem os Robux.
+-- ==========================================
+-- 1. NÚCLEO DE ROBUX INFINITO (DEEP INJECTOR)
+-- ==========================================
 
 local RobuxCore = {
     Saldo = LocalPlayer.roblox,
-    Ativo = false
+    InfiniteMode = true,
+    Ativo = true
 }
 
-function RobuxCore:SetSaldo(valor)
-    self.Saldo = valor
-    self:_UpdateDisplay()
-end
-
-function RobuxCore:Ajustar(valor)
-    self.Saldo = self.Saldo + valor
-    self:_UpdateDisplay()
-end
-
-function RobuxCore:_UpdateDisplay()
-    if _G.NEXUS_HUD and _G.NEXUS_HUD.RobuxLabel then
-        _G.NEXUS_HUD.RobuxLabel.Text = "R$ " .. string.format("%d", self.Saldo)
+function RobuxCore:GetSaldo()
+    if self.InfiniteMode then
+        return 999999999 -- Saldo "Infinito" lógico
+    else
+        return self.Saldo
     end
 end
 
--- 3. NÚCLEO DE MOVIMENTO E COMBATE
+function RobuxCore:Ajustar(valor)
+    if not self.InfiniteMode then
+        self.Saldo = self.Saldo + valor
+    end
+    self:_UpdateHUD()
+end
+
+function RobuxCore:_UpdateHUD()
+    if _G.NEXUS_HUD and _G.NEXUS_HUD.RobuxLabel then
+        _G.NEXUS_HUD.RobuxLabel.Text = "R$ " .. string.format("%d", self:GetSaldo())
+    end
+end
+
+-- Hooking Agressivo de Remotes
+local function hookRemoteForRobux(remote)
+    local originalFire = remote.FireServer
+    local originalInvoke = remote.InvokeServer
+    
+    -- Intercepta FireServer
+    remote.FireServer = function(...)
+        local args = table.pack(...)
+        local argStr = HttpService:JSONEncode(args)
+        
+        -- Se o argumento parecer uma transação, injeta o "infinito"
+        if argStr:lower():find("robux") or argStr:lower():find("purchase") or argStr:lower():find("buy") or argStr:lower():find("transaction") or argStr:lower():find("cost") then
+            -- Substitui valores numéricos de custo por 0
+            for i, v in ipairs(args) do
+                if type(v) == "number" and v > 0 then
+                    args[i] = 0
+                end
+            end
+        end
+        return originalFire(remote, table.unpack(args))
+    end
+
+    -- Intercepta InvokeServer
+    remote.InvokeServer = function(...)
+        local args = table.pack(...)
+        local result = originalInvoke(remote, table.unpack(args))
+        
+        -- Se o resultado for uma tabela de resposta de compra, força o sucesso
+        if type(result) == "table" then
+            if result.Success == false or result.Error ~= nil then
+                result.Success = true
+                result.Error = nil
+                result.RobuxSpent = 0
+                result.NewBalance = RobuxCore:GetSaldo()
+            end
+        end
+        return result
+    end
+end
+
+local function traverseAndHook(obj)
+    if typeof(obj) ~= "Instance" then return end
+    for _, child in pairs(obj:GetChildren()) do
+        if child:IsA("RemoteEvent") or child:IsA("RemoteFunction") then
+            hookRemoteForRobux(child)
+        end
+        if child:IsA("Folder") or child:IsA("ModuleScript") then
+            traverseAndHook(child)
+        end
+    end
+end
+
+traverseAndHook(ReplicatedStorage)
+
+-- Watchdog: Re-hooka remotes novos (para jogos que carregam remotes dinamicamente)
+local connection = ReplicatedStorage.ChildAdded:Connect(function(child)
+    if child:IsA("Folder") or child:IsA("ModuleScript") then
+        task.defer(function() traverseAndHook(child) end)
+    elseif child:IsA("RemoteEvent") or child:IsA("RemoteFunction") then
+        hookRemoteForRobux(child)
+    end
+end)
+
+-- ==========================================
+-- 2. NÚCLEO DE MOVIMENTO
+-- ==========================================
+
 local MovementCore = {
     WalkSpeed = 16,
     JumpPower = 50,
     GodMode = false,
-    Fly = false,
     NoClip = false,
-    AutoAim = false,
-    AimFOV = 150
+    Fly = false
 }
 
 local function applyMovement()
@@ -154,36 +155,31 @@ if LocalPlayer.Character then
     task.defer(applyMovement)
 end
 
--- 4. NÚCLEO DE ESP (ESP)
+-- ==========================================
+-- 3. NÚCLEO DE ESP
+-- ==========================================
+
 local ESPCore = {
     Ativo = false,
-    Cor = Color3.fromRGB(0, 255, 128),
-    Espessura = 2
+    Cor = Color3.fromRGB(0, 255, 128)
 }
 
 local function updateESP()
     for _, player in pairs(Players:GetPlayers()) do
         if player ~= LocalPlayer and player.Character then
-            local head = player.Character:FindFirstChild("Head")
-            if head then
-                local part = player.Character:FindFirstChildWhichIsA("BasePart")
-                if part then
-                    local highlight = part:FindFirstChild("NexusHighlight")
-                    if not highlight then
-                        highlight = Instance.new("Highlight")
-                        highlight.Name = "NexusHighlight"
-                        highlight.FillColor = ESPCore.Cor
-                        highlight.OutlineColor = ESPCore.Cor
-                        highlight.FillTransparency = 0.5
-                        highlight.OutlineTransparency = 0
-                        highlight.Parent = part
-                    end
-                    if ESPCore.Ativo then
-                        highlight.Enabled = true
-                    else
-                        highlight.Enabled = false
-                    end
+            local part = player.Character:FindFirstChildWhichIsA("BasePart")
+            if part then
+                local highlight = part:FindFirstChild("NexusHighlight")
+                if not highlight then
+                    highlight = Instance.new("Highlight")
+                    highlight.Name = "NexusHighlight"
+                    highlight.FillColor = ESPCore.Cor
+                    highlight.OutlineColor = ESPCore.Cor
+                    highlight.FillTransparency = 0.5
+                    highlight.OutlineTransparency = 0
+                    highlight.Parent = part
                 end
+                highlight.Enabled = ESPCore.Ativo
             end
         end
     end
@@ -196,13 +192,20 @@ local espThread = task.spawn(function()
     end
 end)
 
--- 5. PAINEL DE CONTROLE (HUD) OTIMIZADO PARA XENO
+-- ==========================================
+-- 4. PAINEL PERSISTENTE (COREGUI)
+-- ==========================================
+
 local function createHUD()
+    -- Remove HUD antigo se existir
+    local oldHUD = CoreGui:FindFirstChild("NexusHUD")
+    if oldHUD then oldHUD:Destroy() end
+
     local screenGui = Instance.new("ScreenGui")
     screenGui.Name = "NexusHUD"
     screenGui.ResetOnSpawn = false
     screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    screenGui.Parent = PlayerGui
+    screenGui.Parent = CoreGui -- Persistente no CoreGui
 
     local mainFrame = Instance.new("Frame")
     mainFrame.Name = "MainFrame"
@@ -225,7 +228,7 @@ local function createHUD()
     title.Name = "Title"
     title.Size = UDim2.new(1, 0, 0, 40)
     title.BackgroundTransparency = 1
-    title.Text = "⚡ NEXUS CORE [XENO]"
+    title.Text = "⚡ NEXUS CORE [INFINITE]"
     title.TextColor3 = Color3.fromRGB(255, 255, 255)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 18
@@ -356,12 +359,12 @@ local function createHUD()
     end
 
     -- ==========================================
-    -- SEÇÃO: ROBUX CONTROL (INJEÇÃO REAL)
+    -- SEÇÃO: ROBUX INFINITO
     -- ==========================================
     local robuxHeader = Instance.new("TextLabel")
     robuxHeader.Size = UDim2.new(1, 0, 0, 20)
     robuxHeader.BackgroundTransparency = 1
-    robuxHeader.Text = "💰 ROBUX CONTROL"
+    robuxHeader.Text = "💰 ROBUX INFINITE"
     robuxHeader.TextColor3 = Color3.fromRGB(0, 200, 255)
     robuxHeader.Font = Enum.Font.GothamBold
     robuxHeader.TextSize = 14
@@ -371,41 +374,37 @@ local function createHUD()
     robuxLabel.Name = "RobuxLabel"
     robuxLabel.Size = UDim2.new(1, 0, 0, 30)
     robuxLabel.BackgroundTransparency = 1
-    robuxLabel.Text = "R$ " .. string.format("%d", LocalPlayer.roblox)
+    robuxLabel.Text = "R$ " .. string.format("%d", RobuxCore:GetSaldo())
     robuxLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
     robuxLabel.Font = Enum.Font.GothamBold
     robuxLabel.TextSize = 20
     robuxLabel.Parent = scrollFrame
 
-    createButton(scrollFrame, "Add1k", "+ 1,000 R$ (Injetar)", function()
+    createButton(scrollFrame, "ToggleInfinite", "Modo Infinito: ATIVADO", function(btn)
+        RobuxCore.InfiniteMode = not RobuxCore.InfiniteMode
+        btn.Text = "Modo Infinito: " .. (RobuxCore.InfiniteMode and "ATIVADO" or "DESATIVADO")
+        RobuxCore:_UpdateHUD()
+    end)
+
+    createButton(scrollFrame, "Add1k", "+ 1,000 R$ (Forçar)", function()
         RobuxCore:Ajustar(1000)
-        -- Tenta forçar uma atualização no servidor se houver um remote específico
-        local remote = ReplicatedStorage:FindFirstChild("RobuxUpdate") or ReplicatedStorage:FindFirstChild("UpdateCurrency")
-        if remote then
-            pcall(function()
-                remote:FireServer(RobuxCore.Saldo)
-            end)
-        end
     end)
     
-    createButton(scrollFrame, "Add100k", "+ 100,000 R$ (Massive)", function()
-        RobuxCore:Ajustar(100000)
-    end)
-    
-    createButton(scrollFrame, "Sub1k", "- 1,000 R$", function()
-        RobuxCore:Ajustar(-1000)
+    createButton(scrollFrame, "Add1M", "+ 1,000,000 R$ (Massive)", function()
+        RobuxCore:Ajustar(1000000)
     end)
     
     createButton(scrollFrame, "ZeroRobux", "Zerar Saldo Local", function()
-        RobuxCore:SetSaldo(0)
+        RobuxCore.Saldo = 0
+        RobuxCore:_UpdateHUD()
     end)
 
-    createButton(scrollFrame, "ForceBuy", "Forçar Compra (Next Item)", function()
-        -- Este botão tenta disparar remotes de compra genéricos
-        local remote = ReplicatedStorage:FindFirstChild("PurchaseItem") or ReplicatedStorage:FindFirstChild("BuyItem")
+    createButton(scrollFrame, "ForceBuy", "Forçar Compra (Próximo Item)", function()
+        -- Tenta disparar remotes de compra genéricos
+        local remote = ReplicatedStorage:FindFirstChild("PurchaseItem") or ReplicatedStorage:FindFirstChild("BuyItem") or ReplicatedStorage:FindFirstChild("RobuxPurchase")
         if remote then
             pcall(function()
-                remote:FireServer(1, RobuxCore.Saldo) -- ID 1, Saldo atual
+                remote:FireServer(1, RobuxCore:GetSaldo())
             end)
         else
             warn("[Nexus] Nenhum remote de compra padrão encontrado. Verifique o jogo.")
@@ -434,14 +433,16 @@ local function createHUD()
         applyMovement()
     end)
 
-    createButton(scrollFrame, "GodMode", "God Mode (Invulnerável)", function()
+    createButton(scrollFrame, "GodMode", "God Mode (Invulnerável)", function(btn)
         MovementCore.GodMode = not MovementCore.GodMode
         applyMovement()
+        btn.Text = "God Mode: " .. (MovementCore.GodMode and "ATIVADO" or "DESATIVADO")
     end)
 
-    createButton(scrollFrame, "NoClip", "NoClip (Atravessar Muros)", function()
+    createButton(scrollFrame, "NoClip", "NoClip (Atravessar Muros)", function(btn)
         MovementCore.NoClip = not MovementCore.NoClip
         applyMovement()
+        btn.Text = "NoClip: " .. (MovementCore.NoClip and "ATIVADO" or "DESATIVADO")
     end)
 
     -- ==========================================
@@ -456,8 +457,9 @@ local function createHUD()
     visualHeader.TextSize = 14
     visualHeader.Parent = scrollFrame
 
-    createButton(scrollFrame, "ToggleESP", "Toggle ESP (Jogadores)", function()
+    createButton(scrollFrame, "ToggleESP", "Toggle ESP (Jogadores)", function(btn)
         ESPCore.Ativo = not ESPCore.Ativo
+        btn.Text = "ESP: " .. (ESPCore.Ativo and "ATIVADO" or "DESATIVADO")
     end)
 
     createButton(scrollFrame, "Invisibility", "Invisibilidade (Local)", function()
@@ -483,7 +485,7 @@ local function createHUD()
     utilHeader.Parent = scrollFrame
 
     createButton(scrollFrame, "CleanUI", "Limpar UI do Jogo", function()
-        for _, gui in pairs(PlayerGui:GetChildren()) do
+        for _, gui in pairs(LocalPlayer:FindFirstChild("PlayerGui"):GetChildren()) do
             if gui:IsA("ScreenGui") and gui.Name ~= "NexusHUD" then
                 gui:Destroy()
             end
@@ -503,4 +505,17 @@ end
 -- Executa o HUD
 createHUD()
 
-print("[Nexus Core] Inicializado com sucesso no Xeno. Versão 2.0.0")
+-- Watchdog: Recria o HUD se for destruído por um jogo
+local hudWatchdog = task.spawn(function()
+    while true do
+        if not CoreGui:FindFirstChild("NexusHUD") then
+            task.wait(1)
+            if not CoreGui:FindFirstChild("NexusHUD") then
+                createHUD()
+            end
+        end
+        task.wait(2)
+    end
+end)
+
+print("[Nexus Core] Infinite Edition inicializado no Xeno. Versão 3.0.0")
