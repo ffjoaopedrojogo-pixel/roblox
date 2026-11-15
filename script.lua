@@ -1,136 +1,148 @@
--- ROBLOX NEXUS CORE: INFINITE EDITION
--- Versão: 3.0.0
+-- ROBLOX NEXUS CORE: STABLE EDITION
+-- Versão: 4.0.0 (Crash-Proof)
 -- Executor: Xeno
--- Recursos: Robux Infinito, Painel Persistente (CoreGui), God Mode, ESP, Auto-Buy
+-- Correções: Anti-Recursão, Single-Instance Threads, CoreGui Safe
+
+if _G.NEXUS_ACTIVE then
+    warn("[Nexus] Já está ativo. Executando novamente pode causar conflitos.")
+    return
+end
+_G.NEXUS_ACTIVE = true
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
-local TweenService = game:GetService("TweenService")
 local HttpService = game:GetService("HttpService")
 local CoreGui = game:GetService("CoreGui")
 
 local LocalPlayer = Players.LocalPlayer
 
 -- ==========================================
--- 1. NÚCLEO DE ROBUX INFINITO (DEEP INJECTOR)
+-- 1. ESTADO GLOBAL
 -- ==========================================
 
-local RobuxCore = {
-    Saldo = LocalPlayer.roblox,
-    InfiniteMode = true,
-    Ativo = true
+local State = {
+    Robux = {
+        Saldo = LocalPlayer.roblox or 0,
+        InfiniteMode = true
+    },
+    Movement = {
+        WalkSpeed = 16,
+        JumpPower = 50,
+        GodMode = false,
+        NoClip = false
+    },
+    ESP = {
+        Ativo = false,
+        Cor = Color3.fromRGB(0, 255, 128)
+    },
+    UI = {
+        Ativo = true
+    }
 }
 
-function RobuxCore:GetSaldo()
-    if self.InfiniteMode then
-        return 999999999 -- Saldo "Infinito" lógico
-    else
-        return self.Saldo
-    end
-end
+-- ==========================================
+-- 2. NÚCLEO DE ROBUX (SAFE HOOKING)
+-- ==========================================
 
-function RobuxCore:Ajustar(valor)
-    if not self.InfiniteMode then
-        self.Saldo = self.Saldo + valor
-    end
-    self:_UpdateHUD()
-end
+local hookedRemotes = {} -- Mapa de remotes já hookados para evitar duplicatas
 
-function RobuxCore:_UpdateHUD()
-    if _G.NEXUS_HUD and _G.NEXUS_HUD.RobuxLabel then
-        _G.NEXUS_HUD.RobuxLabel.Text = "R$ " .. string.format("%d", self:GetSaldo())
-    end
-end
+local function safeHookRemote(remote)
+    if hookedRemotes[remote] then return end
+    hookedRemotes[remote] = true
 
--- Hooking Agressivo de Remotes
-local function hookRemoteForRobux(remote)
     local originalFire = remote.FireServer
     local originalInvoke = remote.InvokeServer
     
-    -- Intercepta FireServer
+    -- Hook FireServer
     remote.FireServer = function(...)
         local args = table.pack(...)
-        local argStr = HttpService:JSONEncode(args)
         
-        -- Se o argumento parecer uma transação, injeta o "infinito"
-        if argStr:lower():find("robux") or argStr:lower():find("purchase") or argStr:lower():find("buy") or argStr:lower():find("transaction") or argStr:lower():find("cost") then
-            -- Substitui valores numéricos de custo por 0
-            for i, v in ipairs(args) do
-                if type(v) == "number" and v > 0 then
+        -- Apenas processa se for uma transação provável
+        local isTransaction = false
+        for i = 1, args.n do
+            if type(args[i]) == "string" then
+                local lowerStr = args[i]:lower()
+                if lowerStr:find("robux") or lowerStr:find("purchase") or lowerStr:find("buy") or lowerStr:find("cost") then
+                    isTransaction = true
+                    break
+                end
+            elseif type(args[i]) == "number" then
+                -- Se for um número grande, pode ser um custo
+                if args[i] > 100 then isTransaction = true break end
+            end
+        end
+
+        if isTransaction then
+            for i = 1, args.n do
+                if type(args[i]) == "number" and args[i] > 0 then
                     args[i] = 0
                 end
             end
         end
-        return originalFire(remote, table.unpack(args))
+        
+        return originalFire(remote, table.unpack(args, 1, args.n))
     end
 
-    -- Intercepta InvokeServer
+    -- Hook InvokeServer
     remote.InvokeServer = function(...)
         local args = table.pack(...)
-        local result = originalInvoke(remote, table.unpack(args))
+        local result = originalInvoke(remote, table.unpack(args, 1, args.n))
         
-        -- Se o resultado for uma tabela de resposta de compra, força o sucesso
         if type(result) == "table" then
             if result.Success == false or result.Error ~= nil then
                 result.Success = true
                 result.Error = nil
                 result.RobuxSpent = 0
-                result.NewBalance = RobuxCore:GetSaldo()
+                result.NewBalance = State.Robux.InfiniteMode and 999999999 or State.Robux.Saldo
             end
         end
         return result
     end
 end
 
-local function traverseAndHook(obj)
-    if typeof(obj) ~= "Instance" then return end
+local function traverseAndHook(obj, depth)
+    if not obj or depth > 5 then return end -- Limite de profundidade para evitar stack overflow
     for _, child in pairs(obj:GetChildren()) do
         if child:IsA("RemoteEvent") or child:IsA("RemoteFunction") then
-            hookRemoteForRobux(child)
-        end
-        if child:IsA("Folder") or child:IsA("ModuleScript") then
-            traverseAndHook(child)
+            safeHookRemote(child)
+        elseif child:IsA("Folder") or child:IsA("ModuleScript") then
+            traverseAndHook(child, depth + 1)
         end
     end
 end
 
-traverseAndHook(ReplicatedStorage)
+traverseAndHook(ReplicatedStorage, 0)
 
--- Watchdog: Re-hooka remotes novos (para jogos que carregam remotes dinamicamente)
-local connection = ReplicatedStorage.ChildAdded:Connect(function(child)
-    if child:IsA("Folder") or child:IsA("ModuleScript") then
-        task.defer(function() traverseAndHook(child) end)
-    elseif child:IsA("RemoteEvent") or child:IsA("RemoteFunction") then
-        hookRemoteForRobux(child)
+-- Watchdog de Remotes (para jogos dinâmicos)
+ReplicatedStorage.ChildAdded:Connect(function(child)
+    if child:IsA("RemoteEvent") or child:IsA("RemoteFunction") then
+        task.defer(function() safeHookRemote(child) end)
+    elseif child:IsA("Folder") or child:IsA("ModuleScript") then
+        task.defer(function() traverseAndHook(child, 0) end)
     end
 end)
 
 -- ==========================================
--- 2. NÚCLEO DE MOVIMENTO
+-- 3. NÚCLEO DE MOVIMENTO (EVENT-DRIVEN)
 -- ==========================================
 
-local MovementCore = {
-    WalkSpeed = 16,
-    JumpPower = 50,
-    GodMode = false,
-    NoClip = false,
-    Fly = false
-}
-
-local function applyMovement()
+local function applyMovementSettings()
     local character = LocalPlayer.Character
     if not character then return end
     
     local humanoid = character:FindFirstChild("Humanoid")
     if not humanoid then return end
     
-    humanoid.WalkSpeed = MovementCore.WalkSpeed
-    humanoid.JumpPower = MovementCore.JumpPower
+    humanoid.WalkSpeed = State.Movement.WalkSpeed
+    humanoid.JumpPower = State.Movement.JumpPower
     
-    if MovementCore.GodMode then
+    if State.Movement.GodMode then
         humanoid.BreakJointsOnDeath = false
-        character.HumanoidRootPart:SetNetworkOwner(nil)
+        -- SetNetworkOwner(nil) pode causar issues em alguns jogos, usamos pcall
+        pcall(function() character:WaitForChild("HumanoidRootPart"):SetNetworkOwner(nil) end)
+        
+        -- Limpa listeners de Died para evitar múltiplos spawns
         humanoid.Died:Clear()
         humanoid.Died:Connect(function()
             humanoid.Health = 100
@@ -138,74 +150,101 @@ local function applyMovement()
         end)
     else
         humanoid.BreakJointsOnDeath = true
-        character.HumanoidRootPart:SetNetworkOwner(LocalPlayer)
+        pcall(function() character:WaitForChild("HumanoidRootPart"):SetNetworkOwner(LocalPlayer) end)
     end
     
-    if MovementCore.NoClip then
+    if State.Movement.NoClip then
         for _, part in pairs(character:GetDescendants()) do
             if part:IsA("BasePart") then
                 part.CanCollide = false
             end
         end
-    end
-end
-
-LocalPlayer.CharacterAdded:Connect(applyMovement)
-if LocalPlayer.Character then
-    task.defer(applyMovement)
-end
-
--- ==========================================
--- 3. NÚCLEO DE ESP
--- ==========================================
-
-local ESPCore = {
-    Ativo = false,
-    Cor = Color3.fromRGB(0, 255, 128)
-}
-
-local function updateESP()
-    for _, player in pairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer and player.Character then
-            local part = player.Character:FindFirstChildWhichIsA("BasePart")
-            if part then
-                local highlight = part:FindFirstChild("NexusHighlight")
-                if not highlight then
-                    highlight = Instance.new("Highlight")
-                    highlight.Name = "NexusHighlight"
-                    highlight.FillColor = ESPCore.Cor
-                    highlight.OutlineColor = ESPCore.Cor
-                    highlight.FillTransparency = 0.5
-                    highlight.OutlineTransparency = 0
-                    highlight.Parent = part
-                end
-                highlight.Enabled = ESPCore.Ativo
+    else
+        for _, part in pairs(character:GetDescendants()) do
+            if part:IsA("BasePart") then
+                part.CanCollide = true
             end
         end
     end
 end
 
-local espThread = task.spawn(function()
-    while true do
-        updateESP()
-        task.wait(0.5)
-    end
+LocalPlayer.CharacterAdded:Connect(function()
+    task.defer(applyMovementSettings)
 end)
+if LocalPlayer.Character then
+    task.defer(applyMovementSettings)
+end
 
 -- ==========================================
--- 4. PAINEL PERSISTENTE (COREGUI)
+-- 4. NÚCLEO DE ESP (SINGLE THREAD)
+-- ==========================================
+
+if not _G.NEXUS_ESP_THREAD then
+    _G.NEXUS_ESP_THREAD = task.spawn(function()
+        while _G.NEXUS_ACTIVE do
+            if State.ESP.Ativo then
+                for _, player in pairs(Players:GetPlayers()) do
+                    if player ~= LocalPlayer and player.Character then
+                        local part = player.Character:FindFirstChildWhichIsA("BasePart")
+                        if part then
+                            local highlight = part:FindFirstChild("NexusHighlight")
+                            if not highlight then
+                                pcall(function()
+                                    highlight = Instance.new("Highlight")
+                                    highlight.Name = "NexusHighlight"
+                                    highlight.FillColor = State.ESP.Cor
+                                    highlight.OutlineColor = State.ESP.Cor
+                                    highlight.FillTransparency = 0.5
+                                    highlight.OutlineTransparency = 0
+                                    highlight.Parent = part
+                                end)
+                            end
+                            if highlight then
+                                highlight.Enabled = State.ESP.Ativo
+                            end
+                        end
+                    end
+                end
+            else
+                -- Limpa highlights se ESP for desativado
+                for _, player in pairs(Players:GetPlayers()) do
+                    if player ~= LocalPlayer and player.Character then
+                        local part = player.Character:FindFirstChildWhichIsA("BasePart")
+                        if part then
+                            local highlight = part:FindFirstChild("NexusHighlight")
+                            if highlight then
+                                highlight:Destroy()
+                            end
+                        end
+                    end
+                end
+            end
+            task.wait(0.5) -- Throttle para não sobrecarregar
+        end
+    end)
+end
+
+-- ==========================================
+-- 5. UI PERSISTENTE (COREGUI SAFE)
 -- ==========================================
 
 local function createHUD()
-    -- Remove HUD antigo se existir
-    local oldHUD = CoreGui:FindFirstChild("NexusHUD")
-    if oldHUD then oldHUD:Destroy() end
+    if CoreGui:FindFirstChild("NexusHUD") then
+        CoreGui:FindFirstChild("NexusHUD"):Destroy()
+    end
 
     local screenGui = Instance.new("ScreenGui")
     screenGui.Name = "NexusHUD"
     screenGui.ResetOnSpawn = false
     screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    screenGui.Parent = CoreGui -- Persistente no CoreGui
+    
+    pcall(function()
+        screenGui.Parent = CoreGui
+    end)
+    
+    if not screenGui.Parent then
+        screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+    end
 
     local mainFrame = Instance.new("Frame")
     mainFrame.Name = "MainFrame"
@@ -228,7 +267,7 @@ local function createHUD()
     title.Name = "Title"
     title.Size = UDim2.new(1, 0, 0, 40)
     title.BackgroundTransparency = 1
-    title.Text = "⚡ NEXUS CORE [INFINITE]"
+    title.Text = "⚡ NEXUS CORE [STABLE]"
     title.TextColor3 = Color3.fromRGB(255, 255, 255)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 18
@@ -267,7 +306,9 @@ local function createHUD()
         cornerBtn.Parent = btn
 
         btn.MouseButton1Click:Connect(function()
-            if callback then callback(btn) end
+            if callback then 
+                pcall(function() callback(btn) end) 
+            end
         end)
         return btn
     end
@@ -319,7 +360,6 @@ local function createHUD()
         cornerHandle.Parent = handle
 
         local dragging = false
-        local dragInput
 
         local function updateSlider(input)
             local canvasPosition = input.Position
@@ -327,17 +367,17 @@ local function createHUD()
             local sliderSize = slider.AbsoluteSize
             local relX = math.clamp(canvasPosition.X - sliderPosition.X, 0, sliderSize.X)
             local relXPercentage = relX / sliderSize.X
-            local newHandlePosition = UDim2.new(relXPercentage, 0, 0, 0)
-            handle.Position = newHandlePosition
+            handle.Position = UDim2.new(relXPercentage, 0, 0, 0)
             local newValue = min + (max - min) * relXPercentage
             valueLabel.Text = tostring(math.floor(newValue))
-            if callback then callback(newValue) end
+            if callback then 
+                pcall(function() callback(newValue) end)
+            end
         end
 
         slider.InputBegan:Connect(function(input)
             if input.UserInputType == Enum.UserInputType.MouseButton1 then
                 dragging = true
-                dragInput = input
                 updateSlider(input)
             end
         end)
@@ -350,7 +390,6 @@ local function createHUD()
 
         UserInputService.InputChanged:Connect(function(input)
             if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
-                dragInput = input
                 updateSlider(input)
             end
         end)
@@ -374,40 +413,47 @@ local function createHUD()
     robuxLabel.Name = "RobuxLabel"
     robuxLabel.Size = UDim2.new(1, 0, 0, 30)
     robuxLabel.BackgroundTransparency = 1
-    robuxLabel.Text = "R$ " .. string.format("%d", RobuxCore:GetSaldo())
+    robuxLabel.Text = "R$ " .. string.format("%d", State.Robux.InfiniteMode and 999999999 or State.Robux.Saldo)
     robuxLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
     robuxLabel.Font = Enum.Font.GothamBold
     robuxLabel.TextSize = 20
     robuxLabel.Parent = scrollFrame
 
     createButton(scrollFrame, "ToggleInfinite", "Modo Infinito: ATIVADO", function(btn)
-        RobuxCore.InfiniteMode = not RobuxCore.InfiniteMode
-        btn.Text = "Modo Infinito: " .. (RobuxCore.InfiniteMode and "ATIVADO" or "DESATIVADO")
-        RobuxCore:_UpdateHUD()
+        State.Robux.InfiniteMode = not State.Robux.InfiniteMode
+        btn.Text = "Modo Infinito: " .. (State.Robux.InfiniteMode and "ATIVADO" or "DESATIVADO")
+        robuxLabel.Text = "R$ " .. string.format("%d", State.Robux.InfiniteMode and 999999999 or State.Robux.Saldo)
     end)
 
     createButton(scrollFrame, "Add1k", "+ 1,000 R$ (Forçar)", function()
-        RobuxCore:Ajustar(1000)
+        State.Robux.Saldo = State.Robux.Saldo + 1000
+        if not State.Robux.InfiniteMode then
+            robuxLabel.Text = "R$ " .. string.format("%d", State.Robux.Saldo)
+        end
     end)
     
     createButton(scrollFrame, "Add1M", "+ 1,000,000 R$ (Massive)", function()
-        RobuxCore:Ajustar(1000000)
+        State.Robux.Saldo = State.Robux.Saldo + 1000000
+        if not State.Robux.InfiniteMode then
+            robuxLabel.Text = "R$ " .. string.format("%d", State.Robux.Saldo)
+        end
     end)
     
     createButton(scrollFrame, "ZeroRobux", "Zerar Saldo Local", function()
-        RobuxCore.Saldo = 0
-        RobuxCore:_UpdateHUD()
+        State.Robux.Saldo = 0
+        if not State.Robux.InfiniteMode then
+            robuxLabel.Text = "R$ " .. string.format("%d", State.Robux.Saldo)
+        end
     end)
 
     createButton(scrollFrame, "ForceBuy", "Forçar Compra (Próximo Item)", function()
-        -- Tenta disparar remotes de compra genéricos
         local remote = ReplicatedStorage:FindFirstChild("PurchaseItem") or ReplicatedStorage:FindFirstChild("BuyItem") or ReplicatedStorage:FindFirstChild("RobuxPurchase")
         if remote then
             pcall(function()
-                remote:FireServer(1, RobuxCore:GetSaldo())
+                remote:FireServer(1, State.Robux.InfiniteMode and 999999999 or State.Robux.Saldo)
             end)
         else
-            warn("[Nexus] Nenhum remote de compra padrão encontrado. Verifique o jogo.")
+            warn("[Nexus] Nenhum remote de compra padrão encontrado.")
         end
     end)
 
@@ -424,25 +470,25 @@ local function createHUD()
     moveHeader.Parent = scrollFrame
 
     createSlider(scrollFrame, "WalkSpeed", "Walk Speed", 0, 200, 16, function(val)
-        MovementCore.WalkSpeed = val
-        applyMovement()
+        State.Movement.WalkSpeed = val
+        applyMovementSettings()
     end)
 
     createSlider(scrollFrame, "JumpPower", "Jump Power", 0, 200, 50, function(val)
-        MovementCore.JumpPower = val
-        applyMovement()
+        State.Movement.JumpPower = val
+        applyMovementSettings()
     end)
 
-    createButton(scrollFrame, "GodMode", "God Mode (Invulnerável)", function(btn)
-        MovementCore.GodMode = not MovementCore.GodMode
-        applyMovement()
-        btn.Text = "God Mode: " .. (MovementCore.GodMode and "ATIVADO" or "DESATIVADO")
+    createButton(scrollFrame, "GodMode", "God Mode: DESATIVADO", function(btn)
+        State.Movement.GodMode = not State.Movement.GodMode
+        applyMovementSettings()
+        btn.Text = "God Mode: " .. (State.Movement.GodMode and "ATIVADO" or "DESATIVADO")
     end)
 
-    createButton(scrollFrame, "NoClip", "NoClip (Atravessar Muros)", function(btn)
-        MovementCore.NoClip = not MovementCore.NoClip
-        applyMovement()
-        btn.Text = "NoClip: " .. (MovementCore.NoClip and "ATIVADO" or "DESATIVADO")
+    createButton(scrollFrame, "NoClip", "NoClip: DESATIVADO", function(btn)
+        State.Movement.NoClip = not State.Movement.NoClip
+        applyMovementSettings()
+        btn.Text = "NoClip: " .. (State.Movement.NoClip and "ATIVADO" or "DESATIVADO")
     end)
 
     -- ==========================================
@@ -457,9 +503,9 @@ local function createHUD()
     visualHeader.TextSize = 14
     visualHeader.Parent = scrollFrame
 
-    createButton(scrollFrame, "ToggleESP", "Toggle ESP (Jogadores)", function(btn)
-        ESPCore.Ativo = not ESPCore.Ativo
-        btn.Text = "ESP: " .. (ESPCore.Ativo and "ATIVADO" or "DESATIVADO")
+    createButton(scrollFrame, "ToggleESP", "ESP: DESATIVADO", function(btn)
+        State.ESP.Ativo = not State.ESP.Ativo
+        btn.Text = "ESP: " .. (State.ESP.Ativo and "ATIVADO" or "DESATIVADO")
     end)
 
     createButton(scrollFrame, "Invisibility", "Invisibilidade (Local)", function()
@@ -485,37 +531,41 @@ local function createHUD()
     utilHeader.Parent = scrollFrame
 
     createButton(scrollFrame, "CleanUI", "Limpar UI do Jogo", function()
-        for _, gui in pairs(LocalPlayer:FindFirstChild("PlayerGui"):GetChildren()) do
-            if gui:IsA("ScreenGui") and gui.Name ~= "NexusHUD" then
-                gui:Destroy()
+        local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+        if playerGui then
+            for _, gui in pairs(playerGui:GetChildren()) do
+                if gui:IsA("ScreenGui") and gui.Name ~= "NexusHUD" then
+                    gui:Destroy()
+                end
             end
         end
     end)
 
     createButton(scrollFrame, "CloseHUD", "Fechar Nexus Core", function()
         screenGui:Destroy()
-        _G.NEXUS_HUD = nil
+        State.UI.Ativo = false
     end)
 
-    _G.NEXUS_HUD = {
-        RobuxLabel = robuxLabel
-    }
+    State.UI.Ativo = true
 end
 
 -- Executa o HUD
-createHUD()
-
--- Watchdog: Recria o HUD se for destruído por um jogo
-local hudWatchdog = task.spawn(function()
-    while true do
-        if not CoreGui:FindFirstChild("NexusHUD") then
-            task.wait(1)
-            if not CoreGui:FindFirstChild("NexusHUD") then
-                createHUD()
-            end
-        end
-        task.wait(2)
-    end
+pcall(function()
+    createHUD()
 end)
 
-print("[Nexus Core] Infinite Edition inicializado no Xeno. Versão 3.0.0")
+-- Watchdog de Estabilidade (Recria HUD se destruído)
+if not _G.NEXUS_HUD_WATCHDOG then
+    _G.NEXUS_HUD_WATCHDOG = task.spawn(function()
+        while _G.NEXUS_ACTIVE do
+            task.wait(3)
+            if State.UI.Ativo and not CoreGui:FindFirstChild("NexusHUD") and not LocalPlayer:FindFirstChild("PlayerGui"):FindFirstChild("NexusHUD") then
+                pcall(function()
+                    createHUD()
+                end)
+            end
+        end
+    end)
+end
+
+print("[Nexus Core] Stable Edition inicializado. Versão 4.0.0")
